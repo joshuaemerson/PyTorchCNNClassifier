@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+myenv/
+.env/
+
+# PyTorch / model artifacts
+outputs/
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+
+# Datasets (torchvision downloads these automatically)
+data/
+
+# Jupyter notebooks
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# Logs & experiment tracking
+runs/
+logs/
+*.log
+wandb/
+mlruns/
+
+# Environment variables
+.env
+.env.local
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*.DS_Store
+Thumbs.db
