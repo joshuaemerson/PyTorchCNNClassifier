@@ -1,129 +1,179 @@
+import optuna
 import torch
 import torch.nn as nn
+import torch.optim as optim
+from .dataset import train_loader, val_loader
+from .model import FlexibleCNN
 
-# Select the appropriate device to load data and params to for training
-DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-print(f"Using Device: {DEVICE}")
+def training_epoch(model, train_loader, optimizer, loss_function, device, num_epochs, emty_cache=True):
+    """Performs a single training epoch for a given model.
 
-# Define a Flexible CNN Class to be used for image classification
-class FlexibleCNN(nn.Module):
+    Args:
+        model: The neural network model to be trained.
+        train_loader: The DataLoader for the training data.
+        optimizer: The optimization algorithm to update model weights.
+        loss_function: The loss function used to evaluate model performance.
+        device: The device (e.g., 'cuda' or 'cpu') to run the training on.
+        num_epochs: The total number of epochs for training.
+        emty_cache: A boolean flag to empty the CUDA cache after each batch.    
+    Returns:
+        The average loss for the epoch.
     """
-    A customizable convolutional neural network (CNN) for image classification.
-    It dynamically constructs convolutional blocks based on provided hyperparameters
-    such as the number of layers, filter sizes, kernel sizes, and dropout rates.
+    # Set the model to training mode
+    model.train()
+
+    # Initialize the total loss for the epoch
+    running_loss = 0.0
+
+    # Iterate over the batches of data in the training loader
+    for images, labels in train_loader:
+        # Move images and labels to the specified device
+        images = images.to(device)
+        labels = labels.to(device)
+
+        # Perform a forward pass to get the model's predictions
+        outputs = model(images)
+        # Calculate the loss between the predictions and true labels
+        loss = loss_function(outputs, labels)
+
+        # Clear the gradients from the previous iteration
+        optimizer.zero_grad()
+        # Perform backpropagation to compute gradients
+        loss.backward()
+        # Update the model's weights using the optimizer
+        optimizer.step()
+
+        # Add the current batch's loss to the running total
+        running_loss += loss.item()
+
+        # Optionally, clear memory to prevent out-of-memory errors
+        if emty_cache:
+            del images, labels, outputs, loss
+            torch.cuda.empty_cache()
+
+    # Calculate the average loss for the entire epoch
+    epoch_loss = running_loss / len(train_loader)
+    # Return the calculated average epoch loss
+    return epoch_loss
+
+def evaluate_model(model, val_loader, device):
     """
+    Evaluates the performance of a model on a validation dataset.
 
-    def __init__(
-        self, n_layers, n_filters, kernel_sizes, dropout_rate, fc_size, num_classes=2
-    ):
-        """
-        Initializes the FlexibleCNN.
+    Args:
+        model: The model to be evaluated.
+        val_loader: DataLoader for the validation dataset.
+        device: The device (e.g., 'cpu' or 'cuda') to run the evaluation on.
+    Returns:
+        The accuracy of the model on the validation dataset.
+    """
+    # Set the model to evaluation mode
+    model.eval()
+    # Initialize variables for tracking correct predictions and total samples
+    correct, total = 0, 0
+    # Disable gradient calculations for inference
+    with torch.no_grad():
+        for inputs, labels in val_loader:
+            inputs, labels = inputs.to(device), labels.to(device)
+            outputs = model(inputs)
+            # Get the predicted class with the highest probability
+            _, predicted = torch.max(outputs, 1)
+            # Update the total number of samples
+            total += labels.size(0)
+            # Update the count of correctly predicted samples
+            correct += (predicted == labels).sum().item()
 
-        Args:
-            n_layers (int): Number of convolutional layers.
-            n_filters (list): Number of filters for each convolutional layer.
-            kernel_sizes (list): Kernel sizes for each convolutional layer.
-            dropout_rate (float): Dropout rate for regularization.
-            fc_size (int): Number of units in the fully connected layer.
-            num_classes (int): Number of output classes.
-        """
-        super(FlexibleCNN, self).__init__()
+            # Release memory to prevent memory leaks
+            del inputs, labels, outputs
+            # Clear the GPU cache
+            torch.cuda.empty_cache()
 
-        self.num_classes = num_classes
+    # Calculate the accuracy
+    accuracy = correct / total
+    return accuracy
+
+def design_search_space(trial):
+    """
+    Design the search space for hyperparameter optimization of the FlexibleCNN model.
+    This function uses Optuna to suggest hyperparameters for the CNN architecture and training process.
+    Args:
+        trial (optuna.Trial): An Optuna trial object used to suggest hyperparameters.
+    Returns:
+        dict: A dictionary containing the suggested hyperparameters.    
+    """
+    # CNN Architecture Hyperparameters
+    n_layers = trial.suggest_int("n_layers", 1, 3)
+    n_filters = [ 
+        trial.suggest_int(f"n_filters_layer{i}", 8, 64, step=8) for i in range(n_layers)
+    ] 
+    kernel_sizes = [ 
+        trial.suggest_int(f"kernel_size_layer{i}", 3, 5, step=2) for i in range(n_layers)
+    ] 
+    dropout_rate = trial.suggest_float("dropout_rate", 0.1, 0.5)
+    fc_size = trial.suggest_int("fc_size", 64, 512, step=64)
+
+    
+    # Training Hyperparameters
+    learning_rate = trial.suggest_float("learning_rate", 1e-4, 1e-2, log=True)
+    
+    return {
+        "n_layers": n_layers,
+        "n_filters": n_filters,
+        "kernel_sizes": kernel_sizes,
+        "dropout_rate": dropout_rate,
+        "fc_size": fc_size,
+        "learning_rate": learning_rate,
+    }
+
+def objective_function(trial, device, dataset_path, n_epochs=4, test=False):
+    """
+    Objective function for Optuna to optimize the hyperparameters of the FlexibleCNN model.
+    Args:
+        trial (optuna.Trial): An Optuna trial object used to suggest hyperparameters.
+        n_epochs (int): Number of epochs for training the model.
+        silent (bool): If True, suppresses output during training and evaluation.
+        test (bool): If True, extracts attributes from the trial for evaluation purposes.
+    Returns:
+        float: The accuracy of the model on the validation set.
+    """
+    params = design_search_space(trial)
+
+    # Define the model using the FlexibleCNN class with the parameters from the trial
+    model = FlexibleCNN(
+        n_layers = params["n_layers"],
+        n_filters = params["n_filters"],
+        kernel_sizes = params["kernel_sizes"],
+        dropout_rate = params["dropout_rate"],
+        fc_size = params["fc_size"],
+        num_classes=10
+    ) 
+    
+    # Initialize the dynamic classifier layer by passing a dummy input through the model
+    # This ensures all parameters are instantiated before the optimizer is defined
+    dummy_input = torch.randn(1, 1, 28, 28).to(device)
+    model = model.to(device)
+    model(dummy_input)
         
-        self.features = nn.ModuleList()
-        in_channels = 1  # Grayscale input images
-        
-        for i in range(n_layers): 
-            # Create convolutional layer with dynamic parameters
-            
-            # Extract the number of filters and kernel size for the current layer, from n_filters and kernel_sizes
-            out_channels = n_filters[i] 
-            kernel_size = kernel_sizes[i] 
-            
-            
-            padding = (kernel_size - 1) // 2 
+    # Optimizer and Loss Function
+    optimizer = optim.Adam(model.parameters(), lr=params['learning_rate'])
+    loss_fcn = nn.CrossEntropyLoss()
 
-            # Create a convolutional block, by using a `nn.Sequential` container to group layers together
-            block = nn.Sequential(
-                # Add a Convolutional layer `Conv2d` with parameters: `in_channels`, `out_channels`, `kernel_size`, and `padding`
-                nn.Conv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_size, padding=padding),
-                # Add a Batch normalization layer `BatchNorm2d` with `num_features` as `out_channels` 
-                nn.BatchNorm2d(num_features=out_channels),
-                # Add a ReLU activation
-                nn.ReLU(), 
-                # Add a MaxPool2d layer `MaxPool2d`, with `kernel_size=2` and `stride=2`
-                nn.MaxPool2d(kernel_size=2, stride=2)
-            )
-                
-            # Append the convolutional block to the features ModuleList
-            self.features.append(block)
-
-            # Update in_channels for the next layer (the input channels for the next layer is the output channels of the current layer)
-            in_channels = out_channels
-            
-
-        self.dropout_rate = dropout_rate
-        self.fc_size = fc_size        
-                
-        # Classifier will be initialized after calculating flattened size
-        self.classifier = None  
-        self._flattened_size = None 
-        
-
-    def _create_classifier(self, flattened_size):
-        """
-        Creates the fully connected classifier part of the model based on the flattened feature size.
-
-        Args:
-            flattened_size (int): Size of the flattened feature maps.
-        """
-
-        # Create the classifier using a Sequential container
-        self.classifier = nn.Sequential(
-            # Add a dropout layer with the dropout rate defined at initialization
-            nn.Dropout(p=self.dropout_rate), 
-            # Add a fully connected layer `Linear` with `in_features=flattened_size` and `out_features` as `fc_size`
-            nn.Linear(flattened_size, self.fc_size),
-            # Activation function
-            nn.ReLU(), 
-            # # Another dropout layer
-            nn.Dropout(p=self.dropout_rate), 
-            # Add the final fully connected layer with `in_features` as `fc_size` and `out_features` as `num_classes`
-            nn.Linear(self.fc_size, self.num_classes),
+    # Training the model
+    model = model.to(device)
+    
+    # Training
+    for epoch in range(n_epochs):
+        _ = training_epoch(
+            model,
+            train_loader,
+            optimizer,
+            loss_fcn,
+            device,
+            n_epochs,
         )
 
-    def forward(self, x):
-        """
-        Defines the forward pass of the FlexibleCNN.
+    # Evaluation
 
-        Args:
-            x (torch.Tensor): Input tensor (batch of images).
+    accuracy = evaluate_model(model, val_loader, device)
+    return accuracy
 
-        Returns:
-            torch.Tensor: Output tensor (classification scores).
-        """
-        # Apply convolutional feature extraction layers
-        for layer in self.features:
-            x = layer(x)
-
-        # Flatten the output x for the classifier (start_dim=1 to keep the batch dimension)
-        x = torch.flatten(x, start_dim=1)
-
-        # Dynamically create classifier if it doesn't exist
-        if self.classifier is None:
-            # Get the size of the flattened feature maps from the x tensor
-            self._flattened_size = x.shape[1]
-
-            # Create the classifier with the `_flattened_size` 
-            self._create_classifier(self._flattened_size)
-            
-            # Extract the device from the input tensor
-            device = x.device
-            
-            # Move the classifier to the same device as the input tensor, to ensure compatibility with GPU/CPU
-            if self.classifier is not None:
-                self.classifier.to(device)
-
-        # Classification
-        return self.classifier(x)
